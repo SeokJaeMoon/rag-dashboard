@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="ko" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f7fb">
+  <meta name="description" content="HTML5, CSS3, Vanilla JavaScript 기반 로컬 문서 RAG 시뮬레이션 대시보드">
+  <title>DocFlow | 사내 문서 RAG 데모</title>
+  <link rel="stylesheet" href="./style.css">
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#chat-heading">대화 영역으로 바로가기</a>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand" aria-label="DocFlow 문서 검색 대시보드">
+        <span class="brand-icon" aria-hidden="true">
+          <svg viewBox="0 0 32 32" fill="none"><rect x="5" y="4" width="17" height="24" rx="4" stroke="currentColor" stroke-width="2.4"/><path d="M12 11h13M12 16h13M12 21h9" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+        </span>
+        <span class="brand-text"><strong>DocFlow</strong><small>Knowledge workspace</small></span>
+      </div>
+
+      <nav class="top-nav" aria-label="대시보드 영역">
+        <a href="#documents-heading">문서 인덱스</a>
+        <a href="#chat-heading" aria-current="page">AI 질의응답</a>
+      </nav>
+
+      <div class="topbar-actions">
+        <span class="mode-pill"><span class="status-dot" aria-hidden="true"></span> 로컬 데모 모드</span>
+        <button id="theme-toggle" class="theme-toggle" type="button" aria-label="다크 모드로 변경" aria-pressed="false">
+          <svg class="theme-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M19.2 15.8A8.5 8.5 0 0 1 8.2 4.8 8.5 8.5 0 1 0 19.2 15.8Z"/></svg>
+          <span id="theme-label">다크 모드</span>
+        </button>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <aside class="sidebar" aria-labelledby="documents-heading">
+        <div class="sidebar-scroll">
+          <header class="section-head">
+            <div><p class="eyebrow">KNOWLEDGE BASE</p><h1 id="documents-heading">문서 인덱스</h1></div>
+            <span class="tag tag-muted">LOCAL</span>
+          </header>
+
+          <section class="upload-section" aria-labelledby="upload-heading">
+            <div class="subheading-row"><h2 id="upload-heading">문서 업로드</h2><span class="tiny-label">TXT / PDF</span></div>
+            <div id="drop-zone" class="drop-zone" role="button" tabindex="0" aria-label="파일 업로드" aria-describedby="upload-hint">
+              <span class="drop-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V3m0 0L7 8m5-5 5 5M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>
+              </span>
+              <strong>파일을 끌어다 놓으세요</strong>
+              <span>또는 클릭하여 파일 선택</span>
+              <span id="upload-hint" class="drop-hint">TXT는 실제 분할 · PDF는 구조 데모</span>
+            </div>
+            <input id="file-input" class="sr-only" type="file" accept=".txt,.pdf,text/plain,application/pdf" multiple tabindex="-1" aria-hidden="true">
+            <div class="upload-actions">
+              <button id="load-sample" class="secondary-button" type="button">샘플 문서 불러오기</button>
+              <button id="clear-documents" class="text-button" type="button">전체 삭제</button>
+            </div>
+            <p id="upload-feedback" class="feedback" role="status" aria-live="polite">문서는 브라우저 메모리에서만 처리됩니다.</p>
+          </section>
+
+          <section class="overview-section" aria-labelledby="overview-heading">
+            <h2 id="overview-heading">인덱싱 현황</h2>
+            <div class="stat-grid">
+              <div class="stat-card"><span>등록 문서</span><strong id="document-count">0</strong><small>files</small></div>
+              <div class="stat-card"><span>생성 청크</span><strong id="chunk-count">0</strong><small>chunks</small></div>
+              <div class="stat-card"><span>텍스트 분량</span><strong id="character-count">0</strong><small>chars</small></div>
+            </div>
+            <ol class="pipeline" aria-label="가상 RAG 처리 단계">
+              <li class="pipeline-step" data-stage="read"><span class="step-icon">1</span><span><strong>문서 읽기</strong><small>FileReader API</small></span><span class="step-result" id="status-read">대기</span></li>
+              <li class="pipeline-step" data-stage="chunk"><span class="step-icon">2</span><span><strong>텍스트 청크 분리</strong><small>500자 / 60자 오버랩</small></span><span class="step-result" id="status-chunk">대기</span></li>
+              <li class="pipeline-step" data-stage="index"><span class="step-icon">3</span><span><strong>검색 인덱스 준비</strong><small>클라이언트 키워드 매칭</small></span><span class="step-result" id="status-index">대기</span></li>
+            </ol>
+          </section>
+
+          <section class="document-section" aria-labelledby="structure-heading">
+            <div class="subheading-row"><h2 id="structure-heading">문서 구조 및 청크</h2><span id="index-badge" class="tiny-label">0개 문서</span></div>
+            <div id="document-list" class="document-list" aria-label="파싱된 문서 목록">
+              <div class="empty-documents"><span class="empty-glyph" aria-hidden="true">▤</span><p>문서를 업로드하면 목차와 청크가 이곳에 표시됩니다.</p></div>
+            </div>
+          </section>
+        </div>
+        <footer class="sidebar-footer"><span class="privacy-dot" aria-hidden="true"></span> 데모: 문서는 서버로 전송되지 않습니다.</footer>
+      </aside>
+
+      <main class="main-panel" aria-labelledby="chat-heading">
+        <header class="chat-header">
+          <div class="chat-title-group"><span class="assistant-symbol" aria-hidden="true">✳</span><div><p class="eyebrow">DOCUMENT INTELLIGENCE</p><h2 id="chat-heading">문서 기반 질의응답</h2><p class="chat-subtitle">업로드한 문서에서 관련 문장을 찾아 답변하는 RAG UI 데모입니다.</p></div></div>
+          <span class="tag tag-demo">MOCK STREAM</span>
+        </header>
+
+        <section class="chat-workspace" aria-label="챗 인터페이스">
+          <div id="conversation-scroll" class="conversation-scroll">
+            <section id="welcome" class="welcome" aria-labelledby="welcome-heading">
+              <span class="welcome-icon" aria-hidden="true">
+                <svg viewBox="0 0 36 36" fill="none"><rect x="6" y="7" width="24" height="22" rx="6" stroke="currentColor" stroke-width="1.6"/><path d="M12 15h12M12 20h8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="26" cy="26" r="6" fill="currentColor"/><path d="m23.5 26 1.6 1.7 3.3-3.5" stroke="var(--welcome-check)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </span>
+              <p class="eyebrow">YOUR KNOWLEDGE ASSISTANT</p>
+              <h3 id="welcome-heading">사내 문서를 한곳에서 탐색하세요</h3>
+              <p>왼쪽에서 TXT 문서를 업로드하거나 샘플을 불러온 후 질문하세요. 답변과 관련 청크의 출처를 함께 확인할 수 있습니다.</p>
+              <div class="suggestion-grid" aria-label="예시 질문">
+                <button class="suggestion" data-suggestion="재택근무 신청 방법이 무엇인가요?" type="button"><span>업무 제도</span><strong>재택근무 신청 방법이 무엇인가요?</strong><span aria-hidden="true">↗</span></button>
+                <button class="suggestion" data-suggestion="비밀번호 변경 주기는 어떻게 되나요?" type="button"><span>정보 보안</span><strong>비밀번호 변경 주기는 어떻게 되나요?</strong><span aria-hidden="true">↗</span></button>
+                <button class="suggestion" data-suggestion="교육비 지원 기준을 알려줘" type="button"><span>복리 후생</span><strong>교육비 지원 기준을 알려줘</strong><span aria-hidden="true">↗</span></button>
+              </div>
+            </section>
+            <div id="messages" class="messages" role="log" aria-label="대화 메시지" aria-live="off"></div>
+          </div>
+
+          <form id="chat-form" class="chat-composer" autocomplete="off">
+            <label for="question-input" class="composer-label">문서에 대해 질문하기</label>
+            <div class="composer-input-row">
+              <textarea id="question-input" name="question" rows="2" maxlength="1000" placeholder="예: 재택근무 신청은 언제까지 해야 하나요?" aria-describedby="composer-help" required></textarea>
+              <button id="send-button" class="send-button" type="submit" aria-label="질문 전송">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 12 15-8-4 16-3.5-6.5L4 12Zm7.5 1.5L19 4"/></svg>
+              </button>
+              <button id="cancel-button" class="cancel-button" type="button" hidden>중단</button>
+            </div>
+            <div class="composer-footer"><span id="composer-help">Enter 전송 · Shift+Enter 줄바꿈</span><span id="chat-feedback" role="status" aria-live="polite">모의 API · 실제 AI 모델 미사용</span></div>
+          </form>
+        </section>
+        <footer class="main-footer">이 예제의 응답은 실제 AI 생성 결과가 아닌 <strong>키워드 검색 기반 데모</strong>입니다. 출처 원문을 반드시 확인하세요.</footer>
+      </main>
+    </div>
+  </div>
+  <div id="sr-announcer" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>
