@@ -13,7 +13,7 @@
     CHUNK_SIZE: 500,
     CHUNK_OVERLAP: 60,
     MAX_FILES: 8,
-    MAX_TEXT_BYTES: 512 * 1024,
+    MAX_TEXT_BYTES: 2 * 1024 * 1024,
     MAX_PDF_BYTES: 2 * 1024 * 1024,
     FIRST_CHUNKS_SHOWN: 4,
     MOCK_INTERVAL_MS: 28
@@ -62,7 +62,7 @@
   // ─────────────────────────── State layer ───────────────────────────────
   class AppStore {
     constructor() {
-      this.state = { documents: [], messages: [], busy: false, theme: "light" };
+      this.state = { documents: [], activeDocumentId: "all", messages: [], busy: false, theme: "light" };
       this.listeners = new Set();
     }
     subscribe(listener) { this.listeners.add(listener); return () => this.listeners.delete(listener); }
@@ -77,20 +77,70 @@
 
   // ─────────────────────────── Document layer ────────────────────────────
   class DocumentService {
+    // Read exact bytes first. readAsText(file, "UTF-8") silently corrupts Korean
+    // ANSI (CP949) files, which looks like successful upload but breaks retrieval.
     static readFile(file) {
-      const isPdf = file.name.toLowerCase().endsWith(".pdf");
       return new Promise((resolve, reject) => {
         const reader = new FileReader();
-        reader.onload = () => resolve({ data: reader.result, isPdf });
+        reader.onload = () => resolve(reader.result);
         reader.onerror = () => reject(reader.error || new Error("파일을 읽을 수 없습니다."));
         reader.onabort = () => reject(new DOMException("읽기가 취소되었습니다.", "AbortError"));
-        if (isPdf) reader.readAsArrayBuffer(file);
-        else reader.readAsText(file, "UTF-8");
+        reader.readAsArrayBuffer(file);
       });
     }
 
+    static decodeText(data, preference = "auto") {
+      if (!(data instanceof ArrayBuffer) || !data.byteLength) {
+        throw new Error("빈 파일이거나 읽을 수 없는 텍스트 파일입니다.");
+      }
+      const bytes = new Uint8Array(data);
+      const candidates = [];
+      if (preference !== "auto") {
+        candidates.push(preference);
+      } else if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+        candidates.push("utf-8");
+      } else if (bytes[0] === 0xff && bytes[1] === 0xfe) {
+        candidates.push("utf-16le");
+      } else if (bytes[0] === 0xfe && bytes[1] === 0xff) {
+        candidates.push("utf-16be");
+      } else {
+        // A high proportion of NULs on alternating byte positions often
+        // indicates BOM-less UTF-16. Only examine a small prefix.
+        const sampleSize = Math.min(bytes.length - (bytes.length % 2), 512);
+        let evenNulls = 0;
+        let oddNulls = 0;
+        for (let i = 0; i < sampleSize; i += 2) {
+          if (bytes[i] === 0) evenNulls++;
+          if (bytes[i + 1] === 0) oddNulls++;
+        }
+        const pairs = sampleSize / 2;
+        if (pairs >= 4 && oddNulls / pairs > .25 && evenNulls / pairs < .07) {
+          candidates.push("utf-16le");
+        } else if (pairs >= 4 && evenNulls / pairs > .25 && oddNulls / pairs < .07) {
+          candidates.push("utf-16be");
+        }
+        candidates.push("utf-8", "euc-kr"); // euc-kr label covers Windows CP949 in Chrome
+      }
+
+      for (const encoding of [...new Set(candidates)]) {
+        try {
+          const decoded = new TextDecoder(encoding, { fatal: true }).decode(bytes);
+          const text = decoded.replace(/^\uFEFF/, "");
+          const controls = (text.match(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g) || []).length;
+          if (controls / Math.max(text.length, 1) > .01) continue;
+          if (!text.trim()) throw new Error("텍스트 내용이 비어 있습니다.");
+          const label = encoding === "euc-kr" ? "CP949 / EUC-KR" : encoding.toUpperCase();
+          return { text, encoding: label };
+        } catch (error) {
+          if (error.message === "텍스트 내용이 비어 있습니다.") throw error;
+          // Try next encoding only in auto mode.
+        }
+      }
+      throw new Error("문자 인코딩을 판독할 수 없습니다. 인코딩을 UTF-8, CP949, UTF-16으로 직접 선택해 다시 업로드하세요.");
+    }
+
     static normalizeText(text) {
-      return String(text).replace(/\r\n?/g, "\n").replace(/\u0000/g, "").trim();
+      return String(text).replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").replace(/\u0000/g, "").trim();
     }
 
     static isHeading(line) {
@@ -148,7 +198,7 @@
       return output;
     }
 
-    static buildTextDocument(name, sourceText, bytes = 0) {
+    static buildTextDocument(name, sourceText, bytes = 0, encoding = "UTF-8", kind = "txt") {
       const normalized = this.normalizeText(sourceText);
       if (!normalized) throw new Error(`${name}: 텍스트가 비어 있습니다.`);
       const docId = newId();
@@ -165,7 +215,7 @@
           chunks.push(chunk);
         }
       }
-      return { id: docId, name, bytes, kind: "txt", searchable: true,
+      return { id: docId, name, bytes, kind, encoding, searchable: true,
         sections, chunks, characters: Array.from(normalized).length };
     }
 
@@ -193,51 +243,144 @@
 
   // ─────────────────────────── Retrieval layer ───────────────────────────
   class LocalRetriever {
-    static stopWords = new Set(["무엇", "무엇인가요", "알려줘", "어떻게", "어떤", "대해서", "설명", "해주세요", "있나요", "하는", "관련", "정리", "방법", "기준", "되나요", "대해"]);
+    static stopWords = new Set([
+      "무엇", "무엇인가요", "알려줘", "알려", "어떻게", "어떤", "대해서", "설명",
+      "해주세요", "해줘", "있나요", "있는지", "하는", "관련", "정리", "요약",
+      "요점", "핵심", "주요", "내용", "전체", "개요", "문서", "파일", "텍스트",
+      "대해", "보여줘", "뭔가요", "뭔지", "뭐야", "이것", "그것", "해줄래",
+      "주세요", "해주고", "분석", "그리고", "어떤가요", "이거", "그냥", "좀",
+      "간단히", "간략히", "한번", "읽어줘", "문제", "질문", "어느", "뭔데",
+      "what", "about", "please", "tell", "summary", "summarize", "document", "file", "this"
+    ]);
+    static overviewRegex = /(요약|요점|핵심|개요|전체\s*내용|주요\s*내용|어떤\s*내용|무슨\s*내용|무엇을\s*다루|읽어줘|summari[sz]e|overview|summary)/iu;
 
     static tokens(question) {
-      return (question.toLowerCase().match(/[\p{L}\p{N}]{2,}/gu) || [])
-        .map((t) => t.replace(/(인가요|하나요|주세요|습니까|합니다|은|는|이|가|을|를|와|과|의|에|도|만)$/u, ""))
-        .filter((t) => t.length >= 2 && !this.stopWords.has(t));
+      return [...new Set((question.toLowerCase().match(/[\p{L}\p{N}]{2,}/gu) || [])
+        .map((token) => token.replace(/(해주세요|해줘요|해줘|인가요|하나요|습니까|합니다|있나요|되는지|해지는|에서|에게|으로|부터|까지|하고|이나|거나|들은|들의|은|는|이|가|을|를|와|과|의|에|도|만|요)$/u, ""))
+        .filter((token) => token.length >= 2 && !this.stopWords.has(token)))];
     }
 
-    static search(question, documents, limit = 3) {
-      const words = [...new Set(this.tokens(question))];
-      if (!words.length) return [];
-      return documents.filter((d) => d.searchable).flatMap((d) => d.chunks)
-        .map((chunk) => {
-          const body = chunk.text.toLowerCase();
-          const title = (chunk.documentName + " " + chunk.sectionTitle).toLowerCase();
-          let score = 0;
-          for (const word of words) {
-            if (body.includes(word)) score += 3;
-            if (title.includes(word)) score += 2;
+    static compact(value) {
+      return String(value).toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+    }
+
+    static isOverview(question, words) {
+      return this.overviewRegex.test(question) && words.length === 0;
+    }
+
+    static overviewChunks(documents, limit) {
+      const chosen = [];
+      const seen = new Set();
+      // First cover different sections, then fill remaining slots with later chunks.
+      const candidates = [
+        ...documents.flatMap((d) => d.sections.map((s) => s.chunks[0]).filter(Boolean)),
+        ...documents.flatMap((d) => d.chunks)
+      ];
+      for (const chunk of candidates) {
+        if (seen.has(chunk.id)) continue;
+        chosen.push(chunk);
+        seen.add(chunk.id);
+        if (chosen.length >= limit) break;
+      }
+      return chosen;
+    }
+
+    static retrieve(question, documents, limit = 4) {
+      const searchable = documents.filter((d) => d.searchable && d.chunks.length);
+      const base = { documents: searchable.map((d) => d.name), context: [], words: [] };
+      if (!searchable.length) return { ...base, mode: "empty" };
+
+      const words = this.tokens(question);
+      if (this.isOverview(question, words)) {
+        return { ...base, mode: "overview", context: this.overviewChunks(searchable, limit) };
+      }
+      if (!words.length) {
+        return { ...base, mode: "needs-keyword" };
+      }
+      const queryPhrase = this.compact(question);
+      const scored = searchable.flatMap((doc) => doc.chunks.map((chunk) => {
+        const body = chunk.text.toLowerCase();
+        const title = `${chunk.sectionTitle} ${chunk.documentName}`.toLowerCase();
+        const compactBody = this.compact(body);
+        const compactTitle = this.compact(title);
+        let score = 0;
+        let matches = 0;
+        for (const word of words) {
+          let matched = false;
+          if (body.includes(word)) { score += 7; matched = true; }
+          else if (compactBody.includes(this.compact(word))) { score += 4; matched = true; }
+          if (title.includes(word) || compactTitle.includes(this.compact(word))) {
+            score += 5; matched = true;
           }
-          return { chunk, score };
-        })
-        .filter((entry) => entry.score > 0)
-        .sort((a, b) => b.score - a.score || a.chunk.order - b.chunk.order)
-        .slice(0, limit).map(({ chunk, score }) => ({ ...chunk, score }));
+          if (matched) matches++;
+        }
+        score += matches >= 2 ? 4 * matches : 0;
+        if (queryPhrase.length >= 4 && compactBody.includes(queryPhrase)) score += 9;
+        return { chunk, score, matches };
+      }));
+      const context = scored.filter((x) => x.score > 0)
+        .sort((a, b) => b.matches - a.matches || b.score - a.score || a.chunk.order - b.chunk.order)
+        .slice(0, limit)
+        .map((entry) => ({ ...entry.chunk, score: entry.score }));
+      return { ...base, mode: context.length ? "search" : "no-match", context, words };
+    }
+
+    static excerpt(chunk, words, limit = 235) {
+      // A short chunk is the most reliable excerpt: preserve amounts, deadlines,
+      // and necessary context instead of taking only the matching heading.
+      if (Array.from(chunk.text).length <= limit) return chunk.text.trim();
+      const lines = chunk.text.split(/(?<=[.!?。])\s+|\n+/u).map((line) => line.trim()).filter(Boolean);
+      let best = { text: chunk.text, score: -1 };
+      for (const line of lines) {
+        const compact = this.compact(line);
+        const matches = words.reduce((n, word) => n + Number(compact.includes(this.compact(word))), 0);
+        const score = matches * 10 + (/[.!?。]$/u.test(line) ? 3 : 0) +
+          (/[0-9]/u.test(line) ? 2 : 0) + Math.min(line.length / 100, 1);
+        if (score > best.score) best = { text: line, score };
+      }
+      let result = best.text;
+      if (Array.from(result).length > limit && words.length) {
+        const lowered = result.toLowerCase();
+        const starts = words.map((word) => lowered.indexOf(word)).filter((index) => index >= 0);
+        if (starts.length) {
+          const chars = Array.from(result);
+          const charStart = Array.from(result.slice(0, Math.min(...starts))).length;
+          const offset = Math.max(0, charStart - 45);
+          result = (offset ? "…" : "") + chars.slice(offset, offset + limit).join("");
+        }
+      }
+      return shorten(result, limit);
     }
   }
 
-  function buildMockAnswer(question, context) {
-    if (!context.length) {
-      return "[데모 RAG 검색 결과]\n\n질문: " + question +
-        "\n\n검색 가능한 TXT 문서에서 질문과 관련된 근거를 찾지 못했습니다. " +
-        "왼쪽에서 샘플 문서를 불러오거나 관련 TXT 파일을 업로드해 주세요. " +
-        "PDF는 현재 구조 표시만 지원하며 본문을 검색하지 않습니다.\n\n" +
-        "※ 이는 실제 AI 답변이 아니라 클라이언트 키워드 검색 기반 모의 결과입니다.";
+  function buildMockAnswer(question, retrieval) {
+    const { context = [], mode = "no-match", documents = [], words = [] } = retrieval || {};
+    const names = documents.join(", ");
+    const header = "[업로드 문서 기반 검색 · 모의 RAG]\n";
+    if (mode === "empty") {
+      return header + "\n검색 가능한 TXT 문서가 없습니다. 왼쪽에서 텍스트 파일을 업로드한 뒤 질문해 주세요. " +
+        "PDF는 현재 본문 검색을 지원하지 않습니다.\n\n※ 실제 AI 모델을 사용하지 않는 로컬 데모입니다.";
     }
-    const lines = context.map((c, index) =>
-      `${index + 1}. [${c.documentName} / ${c.sectionTitle}]\n   “${shorten(c.text, 165)}”`
+    if (mode === "needs-keyword") {
+      return header + `\n현재 분석 대상: ${names}\n\n질문에서 검색어를 인식하지 못했습니다. ` +
+        "'이 문서 요약해줘' 또는 '교육 일정은?'처럼 질문해 주세요.";
+    }
+    if (mode === "no-match") {
+      return header + `\n현재 분석 대상: ${names}\n질문: ${question}\n\n` +
+        "이 문서의 실제 텍스트에서 질문과 일치하는 근거를 찾지 못했습니다. " +
+        "오른쪽의 분석 대상 선택과 왼쪽 청크 내용을 확인하거나, 문서에 있는 구체적인 명사로 다시 질문해 주세요. " +
+        "전체 내용을 보려면 '이 문서 요약해줘'라고 입력할 수 있습니다.\n\n" +
+        "※ 실제 의미 검색이나 LLM 추론이 아닌 키워드 검색입니다.";
+    }
+    const snippets = context.map((c, index) =>
+      `${index + 1}. [${c.documentName} / ${c.sectionTitle} · 청크 ${c.order}]\n   “${LocalRetriever.excerpt(c, words, 240)}”`
     );
-    return `[데모 RAG 검색 결과]\n\n질문: ${question}\n\n` +
-      `업로드한 TXT 문서에서 관련 표현이 포함된 청크 ${context.length}개를 찾았습니다.\n\n` +
-      lines.join("\n\n") +
-      "\n\n이 내용은 원문 발췌이므로 최종 해석이 필요한 경우 아래 근거 청크를 확인하세요. " +
-      "문서에 명시되지 않은 사항은 확정할 수 없습니다.\n\n" +
-      "※ 실제 LLM·임베딩·벡터 데이터베이스는 연결되지 않은 시뮬레이션입니다.";
+    const lead = mode === "overview"
+      ? `분석 대상 문서: ${names}\n\n문서의 섹션별 주요 부분 ${context.length}개를 발췌했습니다. (추출식 요약, AI 요약 아님)`
+      : `분석 대상 문서: ${names}\n질문: ${question}\n\n질문과 관련된 원문 청크 ${context.length}개를 검색했습니다.`;
+    return header + "\n" + lead + "\n\n" + snippets.join("\n\n") +
+      "\n\n출처 버튼을 클릭하면 원문 청크를 확인할 수 있습니다. " +
+      "발췌되지 않은 내용은 판단하지 않았습니다.\n\n※ AI 모델·벡터 DB를 사용하지 않는 로컬 검색 데모입니다.";
   }
 
   // ─────────────────────────── Network boundary ──────────────────────────
@@ -249,7 +392,7 @@
     }
     if (options.signal?.aborted) throw new DOMException("요청이 취소되었습니다.", "AbortError");
     const payload = JSON.parse(options.body || "{}");
-    const output = Array.from(buildMockAnswer(payload.question || "", payload.context || []));
+    const output = Array.from(buildMockAnswer(payload.question || "", payload.retrieval || {}));
     const encoder = new TextEncoder();
     let position = 0;
     let timer = null;
@@ -295,12 +438,12 @@
   class RagApiClient {
     constructor(fetchAdapter = mockRagFetch) { this.fetchAdapter = fetchAdapter; }
 
-    async stream(question, context, onDelta, signal) {
+    async stream(question, retrieval, onDelta, signal) {
       // Endpoint contract: POST /api/rag-query → NDJSON {type:'delta',text:'...'} lines.
       const response = await this.fetchAdapter(CONFIG.API_ENDPOINT, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Accept": "application/x-ndjson" },
-        body: JSON.stringify({ question, context }),
+        body: JSON.stringify({ question, retrieval }),
         signal
       });
       if (!response.ok) throw new Error(`RAG API 응답 오류: HTTP ${response.status}`);
@@ -384,7 +527,8 @@
         const summary = h("summary");
         const glyph = h("span", "file-icon", doc.kind.toUpperCase());
         const desc = h("span", "file-summary");
-        desc.append(h("strong", "", doc.name), h("small", "", `${doc.sections.length}개 섹션 · ${doc.chunks.length}개 청크`));
+        desc.append(h("strong", "", doc.name), h("small", "", `${doc.sections.length}개 섹션 · ${doc.chunks.length}개 청크 · ${doc.encoding || "PDF"}`));
+        docDetails.classList.toggle("is-active", this.store.state.activeDocumentId === doc.id);
         summary.append(glyph, desc);
         docDetails.append(summary);
         const inner = h("div", "doc-inner");
@@ -586,12 +730,39 @@
       this.api = new RagApiClient(CONFIG.DEMO_MODE ? mockRagFetch : window.fetch.bind(window));
       this.activeController = null;
       this.activeTypewriter = null;
+      this.importing = false;
       this.store.subscribe((state, change) => {
-        if (change === "documents") this.documentView.render(state.documents);
+        if (change === "documents" || change === "scope") {
+          this.documentView.render(state.documents);
+          this.renderDocumentScope();
+        }
       });
       this.documentView.render([]);
+      this.renderDocumentScope();
       this.initializeTheme();
       this.bindEvents();
+    }
+
+    renderDocumentScope() {
+      const select = $("#document-scope");
+      const { documents, activeDocumentId } = this.store.state;
+      const current = documents.find((doc) => doc.id === activeDocumentId);
+      const fragment = document.createDocumentFragment();
+      const allOption = new Option("전체 등록 문서 (검색 가능한 TXT)", "all");
+      fragment.append(allOption);
+      for (const doc of documents) {
+        if (!doc.searchable) continue;
+        fragment.append(new Option(`${doc.name} · ${doc.chunks.length}청크`, doc.id));
+      }
+      select.replaceChildren(fragment);
+      select.value = current?.searchable ? current.id : "all";
+      const searchableCount = documents.filter((d) => d.searchable).length;
+      const label = current?.searchable ? current.name :
+        (searchableCount ? `전체 텍스트 문서 ${searchableCount}개` : "업로드된 텍스트 문서 없음");
+      $("#scope-hint").textContent = current?.searchable
+        ? `현재 선택된 문서만 검색합니다: ${current.chunks.length}개 청크.`
+        : `검색 가능한 텍스트 파일 ${searchableCount}개 · PDF는 검색 제외`;
+      $("#active-target").textContent = `현재 검색 대상: ${label}`;
     }
 
     setFeedback(message, error = false) {
@@ -619,6 +790,9 @@
 
     bindEvents() {
       $("#theme-toggle").addEventListener("click", () => this.setTheme(this.store.state.theme === "light" ? "dark" : "light"));
+      $("#document-scope").addEventListener("change", (event) => {
+        this.store.update({ activeDocumentId: event.target.value }, "scope");
+      });
       const drop = $("#drop-zone");
       const input = $("#file-input");
       drop.addEventListener("click", () => input.click());
@@ -652,23 +826,23 @@
           this.setFeedback(`최대 ${CONFIG.MAX_FILES}개까지 등록할 수 있습니다.`, true);
           return;
         }
-        if (this.store.state.busy) {
-          this.setFeedback("답변 생성이 끝난 후 문서를 추가해 주세요.", true);
+        if (this.store.state.busy || this.importing) {
+          this.setFeedback("현재 작업이 끝난 후 문서를 추가해 주세요.", true);
           return;
         }
         const doc = DocumentService.buildTextDocument("2026_사내공지사항_샘플.txt", SAMPLE_TEXT,
           new TextEncoder().encode(SAMPLE_TEXT).byteLength);
-        this.store.update({ documents: [...this.store.state.documents, doc] }, "documents");
+        this.store.update({ documents: [...this.store.state.documents, doc], activeDocumentId: doc.id }, "documents");
         this.documentView.setPipeline("ready");
         this.setFeedback("샘플 공지사항이 인덱싱되었습니다. 질문을 입력해 보세요.");
         this.chatView.announce("샘플 문서가 추가되었습니다.");
       });
       $("#clear-documents").addEventListener("click", () => {
-        if (this.store.state.busy) {
-          this.setFeedback("답변 생성 중에는 문서를 삭제할 수 없습니다.", true);
+        if (this.store.state.busy || this.importing) {
+          this.setFeedback("작업 중에는 문서를 삭제할 수 없습니다.", true);
           return;
         }
-        this.store.update({ documents: [] }, "documents");
+        this.store.update({ documents: [], activeDocumentId: "all" }, "documents");
         this.setFeedback("문서가 삭제되었습니다. 대화 내역은 유지됩니다.");
         this.chatView.announce("등록 문서를 모두 삭제했습니다.");
       });
@@ -693,42 +867,77 @@
 
     async importFiles(files) {
       if (!files.length) return;
-      if (this.store.state.busy) { this.setFeedback("응답 생성이 끝난 후 파일을 추가해 주세요.", true); return; }
-      const remaining = CONFIG.MAX_FILES - this.store.state.documents.length;
-      if (remaining <= 0) { this.setFeedback(`최대 ${CONFIG.MAX_FILES}개까지 등록할 수 있습니다.`, true); return; }
-      const selected = files.slice(0, remaining);
-      let imported = 0;
-      const errors = [];
-      this.documentView.setPipeline("read");
-      for (const file of selected) {
-        const lower = file.name.toLowerCase();
-        const isPdf = lower.endsWith(".pdf");
-        if (!lower.endsWith(".txt") && !isPdf) {
-          errors.push(`${file.name}: TXT 또는 PDF 파일만 허용됩니다.`);
-          continue;
-        }
-        if (file.size > (isPdf ? CONFIG.MAX_PDF_BYTES : CONFIG.MAX_TEXT_BYTES)) {
-          errors.push(`${file.name}: 파일 용량 제한을 초과했습니다.`);
-          continue;
-        }
-        try {
-          const { data } = await DocumentService.readFile(file);
-          this.documentView.setPipeline("chunk");
-          const documentModel = isPdf
-            ? DocumentService.buildPdfDemoDocument(file, data)
-            : DocumentService.buildTextDocument(file.name, data, file.size);
-          this.store.update({ documents: [...this.store.state.documents, documentModel] }, "documents");
-          imported++;
-        } catch (error) {
-          errors.push(`${file.name}: ${error.message}`);
-        }
+      if (this.store.state.busy || this.importing) {
+        this.setFeedback("현재 작업이 끝난 뒤 파일을 다시 선택하세요.", true);
+        return;
       }
-      this.documentView.setPipeline(this.store.state.documents.length ? "ready" : "idle");
-      const message = `${imported}개 문서 등록 완료.` +
-        (errors.length ? ` 오류: ${errors.join(" / ")}` : "") +
-        (files.length > selected.length ? ` 파일은 최대 ${CONFIG.MAX_FILES}개까지만 가능합니다.` : "");
-      this.setFeedback(message, errors.length > 0);
-      if (imported) this.chatView.announce(`${imported}개 문서가 추가되었습니다.`);
+      this.importing = true;
+      try {
+        const remaining = CONFIG.MAX_FILES - this.store.state.documents.length;
+        if (remaining <= 0) {
+          this.setFeedback(`최대 ${CONFIG.MAX_FILES}개입니다. 같은 파일을 다시 등록하려면 기존 문서를 삭제하세요.`, true);
+          return;
+        }
+        const selected = files.slice(0, remaining);
+        const errors = [];
+        const imported = [];
+        const manualEncoding = $("#text-encoding").value;
+        this.documentView.setPipeline("read");
+        for (const file of selected) {
+          const lower = file.name.toLowerCase();
+          const isPdf = lower.endsWith(".pdf");
+          const extension = lower.match(/\.([a-z0-9]+)$/)?.[1] || "";
+          if (!isPdf && !["txt", "md", "csv", "log"].includes(extension)) {
+            errors.push(`${file.name}: TXT, MD, CSV, LOG 또는 PDF 파일을 선택해 주세요.`);
+            continue;
+          }
+          if (file.size > (isPdf ? CONFIG.MAX_PDF_BYTES : CONFIG.MAX_TEXT_BYTES)) {
+            errors.push(`${file.name}: 크기 제한(텍스트 2MiB, PDF 2MiB)을 넘었습니다.`);
+            continue;
+          }
+          try {
+            const data = await DocumentService.readFile(file);
+            this.documentView.setPipeline("chunk");
+            let documentModel;
+            if (isPdf) {
+              documentModel = DocumentService.buildPdfDemoDocument(file, data);
+            } else {
+              const decoded = DocumentService.decodeText(data, manualEncoding);
+              documentModel = DocumentService.buildTextDocument(
+                file.name, decoded.text, file.size, decoded.encoding, extension
+              );
+            }
+            // Reuploading the same filename replaces its old index, rather than
+            // mixing stale chunks with the new document's content.
+            const otherDocs = this.store.state.documents.filter(
+              (doc) => doc.name.toLowerCase() !== file.name.toLowerCase()
+            );
+            this.store.update({
+              documents: [...otherDocs, documentModel],
+              activeDocumentId: documentModel.searchable ? documentModel.id : (
+                otherDocs.some((doc) => doc.id === this.store.state.activeDocumentId)
+                  ? this.store.state.activeDocumentId : "all")
+            }, "documents");
+            imported.push(documentModel);
+          } catch (error) {
+            errors.push(`${file.name}: ${error.message}`);
+          }
+        }
+        const doc = [...imported].reverse().find((entry) => entry.searchable);
+        if (doc) this.store.update({ activeDocumentId: doc.id }, "scope");
+        this.documentView.setPipeline(this.store.state.documents.length ? "ready" : "idle");
+        const completed = imported.map((entry) =>
+          `${entry.name} (${entry.searchable ? `${entry.encoding}, ${entry.chunks.length}청크` : "PDF 구조 데모"})`
+        ).join(" / ");
+        const message = `${imported.length}개 등록 완료.` + (completed ? ` ${completed}. ` : " ") +
+          (doc ? `현재 분석 대상: ${doc.name}. 질문하거나 '이 문서 요약해줘'를 입력하세요.` : "") +
+          (errors.length ? ` 오류: ${errors.join(" / ")}` : "") +
+          (files.length > selected.length ? ` 최대 ${CONFIG.MAX_FILES}개까지 등록됩니다.` : "");
+        this.setFeedback(message, errors.length > 0);
+        if (imported.length) this.chatView.announce(`${imported.length}개 문서 추가. 분석 대상이 설정되었습니다.`);
+      } finally {
+        this.importing = false;
+      }
     }
 
     setBusy(busy) {
@@ -740,10 +949,14 @@
     }
 
     async sendQuestion(raw) {
-      if (this.store.state.busy) return;
+      if (this.store.state.busy || this.importing) return;
       const question = String(raw).trim();
       if (!question) return;
-      const context = LocalRetriever.search(question, this.store.state.documents);
+      const docs = this.store.state.activeDocumentId === "all"
+        ? this.store.state.documents
+        : this.store.state.documents.filter((d) => d.id === this.store.state.activeDocumentId);
+      const retrieval = LocalRetriever.retrieve(question, docs);
+      const context = retrieval.context;
       const makeMessage = (role, text, streaming = false) => ({
         id: newId(), role, text, streaming,
         time: new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })
@@ -762,7 +975,7 @@
       let answer = "";
       let citations = [];
       try {
-        await this.api.stream(question, context, (delta) => typer.add(delta), this.activeController.signal);
+        await this.api.stream(question, retrieval, (delta) => typer.add(delta), this.activeController.signal);
         await typer.finish();
         answer = typer.text;
         citations = context;

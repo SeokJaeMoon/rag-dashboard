@@ -212,3 +212,21 @@ section h2 { margin: 0; font-size: 14px; font-weight: 800; }
 @media (max-width: 730px) { .topbar { height: auto; min-height: 70px; padding: 12px 16px; flex-wrap: wrap; gap: 8px; } .brand-text small, .top-nav { display: none; } .theme-toggle { padding: 7px 9px; } .workspace { display: flex; flex-direction: column; } .sidebar { border-right: 0; border-bottom: 1px solid var(--border); } .sidebar-scroll { overflow: visible; } .chat-workspace { min-height: 630px; } .conversation-scroll { max-height: none; min-height: 360px; } .chat-header { padding: 17px 19px; } .chat-title-group h2 { font-size: 17px; } .chat-subtitle { font-size: 10px; } .assistant-symbol { width: 39px; height: 39px; } .chat-composer { margin: 8px 16px 18px; } .welcome { margin-top: 15px; } .main-footer { padding: 13px 20px; } }
 @media (max-width: 410px) { .brand-text strong { font-size: 17px; } .theme-toggle span { display: none; } .section-head { margin-bottom: 15px; } .chat-header .tag-demo { display: none; } .chat-title-group { gap: 9px; } .message.user { max-width: 94%; } .message-bubble { padding: 12px 13px; } .composer-footer { flex-direction: column; gap: 3px; } .composer-footer span:last-child { text-align: left; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; } }
+
+/* v2: encoding selection and active-document scope */
+.encoding-choice, .scope-section { margin-top: 16px; }
+.encoding-choice { display: flex; flex-direction: column; gap: 7px; }
+.encoding-choice label, .scope-section h2 { font-size: 12px; font-weight: 800; color: var(--text); }
+.encoding-choice small, .scope-section p { font-size: 11px; line-height: 1.5; color: var(--muted); margin: 0; }
+.encoding-choice select, .scope-section select {
+  width: 100%; min-width: 0; border: 1px solid var(--border); border-radius: 9px;
+  padding: 10px 12px; color: var(--text); background: var(--surface); font: inherit;
+  font-size: 12px; margin: 3px 0 7px;
+}
+.encoding-choice select:focus-visible, .scope-section select:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+.scope-section { padding: 14px 13px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.scope-section h2 { margin: 0 0 9px; }
+.active-target { margin: 7px 0 0; color: var(--accent-ink); font-size: 11px; font-weight: 700; overflow-wrap: anywhere; }
+.doc-item.is-active { outline: 2px solid var(--accent); outline-offset: 1px; }

@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#f5f7fb">
   <meta name="description" content="HTML5, CSS3, Vanilla JavaScript 기반 로컬 문서 RAG 시뮬레이션 대시보드">
-  <title>DocFlow | 사내 문서 RAG 데모</title>
-  <link rel="stylesheet" href="./style.css">
-  <script src="./app.js" defer></script>
+  <title>DocFlow v2 | TXT 문서 분석 RAG 데모</title>
+  <link rel="stylesheet" href="./style.css?v=2.0">
+  <script src="./app.js?v=2.0" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#chat-heading">대화 영역으로 바로가기</a>
@@ -43,21 +43,41 @@
           </header>
 
           <section class="upload-section" aria-labelledby="upload-heading">
-            <div class="subheading-row"><h2 id="upload-heading">문서 업로드</h2><span class="tiny-label">TXT / PDF</span></div>
+            <div class="subheading-row"><h2 id="upload-heading">문서 업로드</h2><span class="tiny-label">TXT / MD / CSV / LOG</span></div>
             <div id="drop-zone" class="drop-zone" role="button" tabindex="0" aria-label="파일 업로드" aria-describedby="upload-hint">
               <span class="drop-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V3m0 0L7 8m5-5 5 5M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>
               </span>
-              <strong>파일을 끌어다 놓으세요</strong>
+              <strong>분석할 텍스트 파일을 끌어다 놓으세요</strong>
               <span>또는 클릭하여 파일 선택</span>
-              <span id="upload-hint" class="drop-hint">TXT는 실제 분할 · PDF는 구조 데모</span>
+              <span id="upload-hint" class="drop-hint">TXT / MD / CSV / LOG 분석 · PDF는 구조 데모</span>
             </div>
-            <input id="file-input" class="sr-only" type="file" accept=".txt,.pdf,text/plain,application/pdf" multiple tabindex="-1" aria-hidden="true">
+            <input id="file-input" class="sr-only" type="file" accept=".txt,.md,.csv,.log,.pdf,text/plain,application/pdf" multiple tabindex="-1" aria-hidden="true">
             <div class="upload-actions">
               <button id="load-sample" class="secondary-button" type="button">샘플 문서 불러오기</button>
               <button id="clear-documents" class="text-button" type="button">전체 삭제</button>
             </div>
+            <div class="encoding-choice">
+              <label for="text-encoding">텍스트 인코딩</label>
+              <select id="text-encoding" aria-describedby="encoding-hint">
+                <option value="auto">자동 감지 (UTF-8, CP949, UTF-16)</option>
+                <option value="utf-8">UTF-8</option>
+                <option value="euc-kr">CP949 / EUC-KR (Windows ANSI)</option>
+                <option value="utf-16le">UTF-16 LE</option>
+                <option value="utf-16be">UTF-16 BE</option>
+              </select>
+              <small id="encoding-hint">한글이 깨지면 인코딩을 선택한 후 파일을 다시 업로드하세요.</small>
+            </div>
             <p id="upload-feedback" class="feedback" role="status" aria-live="polite">문서는 브라우저 메모리에서만 처리됩니다.</p>
+          </section>
+
+          <section class="scope-section" aria-labelledby="scope-heading">
+            <h2 id="scope-heading">질의응답 분석 대상</h2>
+            <label class="sr-only" for="document-scope">검색할 문서 선택</label>
+            <select id="document-scope" aria-describedby="scope-hint">
+              <option value="all">전체 등록 문서</option>
+            </select>
+            <p id="scope-hint">문서를 업로드하면 해당 파일이 자동 선택됩니다.</p>
           </section>
 
           <section class="overview-section" aria-labelledby="overview-heading">
@@ -86,7 +106,7 @@
 
       <main class="main-panel" aria-labelledby="chat-heading">
         <header class="chat-header">
-          <div class="chat-title-group"><span class="assistant-symbol" aria-hidden="true">✳</span><div><p class="eyebrow">DOCUMENT INTELLIGENCE</p><h2 id="chat-heading">문서 기반 질의응답</h2><p class="chat-subtitle">업로드한 문서에서 관련 문장을 찾아 답변하는 RAG UI 데모입니다.</p></div></div>
+          <div class="chat-title-group"><span class="assistant-symbol" aria-hidden="true">✳</span><div><p class="eyebrow">DOCUMENT INTELLIGENCE</p><h2 id="chat-heading">문서 기반 질의응답</h2><p class="chat-subtitle">업로드한 TXT에서 관련 내용을 검색하고 원문 근거를 표시합니다.</p><p id="active-target" class="active-target">현재 검색 대상: 업로드된 문서 없음</p></div></div>
           <span class="tag tag-demo">MOCK STREAM</span>
         </header>
 
@@ -98,11 +118,11 @@
               </span>
               <p class="eyebrow">YOUR KNOWLEDGE ASSISTANT</p>
               <h3 id="welcome-heading">사내 문서를 한곳에서 탐색하세요</h3>
-              <p>왼쪽에서 TXT 문서를 업로드하거나 샘플을 불러온 후 질문하세요. 답변과 관련 청크의 출처를 함께 확인할 수 있습니다.</p>
+              <p>왼쪽에서 직접 TXT 파일을 업로드하면 해당 파일이 자동 선택됩니다. 질문을 입력하거나 전체 요약을 요청해 보세요.</p>
               <div class="suggestion-grid" aria-label="예시 질문">
-                <button class="suggestion" data-suggestion="재택근무 신청 방법이 무엇인가요?" type="button"><span>업무 제도</span><strong>재택근무 신청 방법이 무엇인가요?</strong><span aria-hidden="true">↗</span></button>
-                <button class="suggestion" data-suggestion="비밀번호 변경 주기는 어떻게 되나요?" type="button"><span>정보 보안</span><strong>비밀번호 변경 주기는 어떻게 되나요?</strong><span aria-hidden="true">↗</span></button>
-                <button class="suggestion" data-suggestion="교육비 지원 기준을 알려줘" type="button"><span>복리 후생</span><strong>교육비 지원 기준을 알려줘</strong><span aria-hidden="true">↗</span></button>
+                <button class="suggestion" data-suggestion="이 문서 요약해줘" type="button"><span>문서 개요</span><strong>이 문서 요약해줘</strong><span aria-hidden="true">↗</span></button>
+                <button class="suggestion" data-suggestion="주요 내용은 무엇인가요?" type="button"><span>내용 탐색</span><strong>주요 내용은 무엇인가요?</strong><span aria-hidden="true">↗</span></button>
+                <button class="suggestion" data-suggestion="신청 기한은 언제인가요?" type="button"><span>키워드 검색</span><strong>신청 기한은 언제인가요?</strong><span aria-hidden="true">↗</span></button>
               </div>
             </section>
             <div id="messages" class="messages" role="log" aria-label="대화 메시지" aria-live="off"></div>
@@ -111,7 +131,7 @@
           <form id="chat-form" class="chat-composer" autocomplete="off">
             <label for="question-input" class="composer-label">문서에 대해 질문하기</label>
             <div class="composer-input-row">
-              <textarea id="question-input" name="question" rows="2" maxlength="1000" placeholder="예: 재택근무 신청은 언제까지 해야 하나요?" aria-describedby="composer-help" required></textarea>
+              <textarea id="question-input" name="question" rows="2" maxlength="1000" placeholder="예: 이 문서 요약해줘 / 교육 신청 기한은 언제인가요?" aria-describedby="composer-help" required></textarea>
               <button id="send-button" class="send-button" type="submit" aria-label="질문 전송">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 12 15-8-4 16-3.5-6.5L4 12Zm7.5 1.5L19 4"/></svg>
               </button>
